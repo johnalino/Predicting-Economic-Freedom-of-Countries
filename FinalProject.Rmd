@@ -1,0 +1,205 @@
+---
+title: "CSC 532 - Final Project"
+output: html_notebook
+---
+
+Read the file, get summary and structure
+```{r}
+efw = read.csv("efw_cc.csv")
+summary(efw)
+str(efw)
+```
+
+Get variables that have more than 40% missing values
+```{r}
+colMeans(is.na(efw))
+which(colMeans(is.na(efw)) > 0.4)
+```
+
+Check that variables with more than 40% missing values aren't correlated
+All three variables seem to be correlated since they have really low p values, so none of them will be removed.
+```{r}
+library(gmodels)
+X2a_judicial_independence <- ifelse(is.na(efw$X2a_judicial_independence), "Missing", "Observed")
+CrossTable(X2a_judicial_independence, efw$ECONOMIC.FREEDOM, chisq = TRUE)
+X2h_reliability_police <- ifelse(is.na(efw$X2h_reliability_police), "Missing", "Observed")
+CrossTable(X2h_reliability_police, efw$ECONOMIC.FREEDOM, chisq = TRUE)
+X2i_business_costs_crime <- ifelse(is.na(efw$X2i_business_costs_crime), "Missing", "Observed")
+CrossTable(X2i_business_costs_crime, efw$ECONOMIC.FREEDOM, chisq = TRUE)
+```
+
+Handle missing variables
+```{r}
+ic <- efw$ISO_code
+co <- efw$countries
+efw <- efw[, !colnames(efw) %in% c("ISO_code","countries")]
+for (i in 1:ncol(efw)) {
+  temp <- efw[, i]
+  temp[is.na(temp)] <- mean(temp, na.rm = TRUE)
+  efw[, i] <- temp
+}
+efw$ISO_code <- ic
+efw$countries <- co
+```
+
+Histogram
+The histogram is left-skewed, meaning that most countries in the world are considered to have good economic freedom.
+```{r}
+hist(efw$ECONOMIC.FREEDOM)
+```
+
+Which variables seem to have the most correlation (plots, boxplots, cor function)
+Based on the below plots, most of the variables seem to have some correlation to a country's economic freedom, with the exception of rank, quartile, X1a_government_consumption, and X1b_transfers.
+```{r}
+plot(ECONOMIC.FREEDOM~., data=efw)
+cor(efw[, !colnames(efw) %in% c("ISO_code","countries")])
+```
+
+Split between train and test data (90% train, 10% test)
+```{r}
+library(caret)
+
+set.seed(1)
+inTrain = createDataPartition(efw$ECONOMIC.FREEDOM, p=0.9, list=FALSE)
+efw_train <- efw[inTrain, ]
+trainLabel <- efw[inTrain, 2]
+efw_test <- efw[-inTrain, ]
+testLabel <- efw[-inTrain, 2]
+```
+
+Lasso Linear Regression
+RMSE = 0.2470609
+```{r}
+set.seed(1)
+lasso <- train(ECONOMIC.FREEDOM~., data=efw_train, method="glmnet", trControl=trainControl("cv", number=10), tuneGrid=expand.grid(alpha=1, lambda=10^seq(-3, 3, length=100)))
+
+coef(lasso$finalModel, lasso$bestTune$lambda)
+
+predictions <- predict(lasso, efw_test)
+RMSE(predictions, efw_test$ECONOMIC.FREEDOM)
+```
+
+Ridge Linear Regression Model
+RMSE = 0.2685492
+```{r}
+set.seed(1)
+ridge <- train(ECONOMIC.FREEDOM~., data=efw_train, method="glmnet", trControl=trainControl("cv", number=10), tuneGrid=expand.grid(alpha=0, lambda=10^seq(-3, 3, length=100)))
+
+predictions <- predict(ridge, efw_test)
+RMSE(predictions, efw_test$ECONOMIC.FREEDOM)
+```
+
+Random forest
+RMSE = 0.2097298
+```{r}
+grid <- expand.grid(mtry=c(2, 4, 8, 16))
+set.seed(1)
+rfModel <- train(ECONOMIC.FREEDOM~., data=efw_train, method="rf", trControl=trainControl(method="cv", number=10), tuneGrid=grid, importance=T)
+rfModel
+
+rf_predictions_binary = predict(rfModel, efw_test)
+RMSE(rf_predictions_binary, efw_test$ECONOMIC.FREEDOM)
+
+varImp(rfModel)
+coef(lasso$finalModel, lasso$bestTune$lambda)
+```
+
+GBT
+RMSE = 0.2025671
+```{r}
+set.seed(1)
+gbm <- train(ECONOMIC.FREEDOM~., data=efw_train, method="gbm", trControl=trainControl("cv", number=10), preProc="nzv")
+
+gbm_predictions_binary = predict(gbm, efw_test)
+RMSE(gbm_predictions_binary, efw_test$ECONOMIC.FREEDOM)
+```
+
+Normalize variables (scale numeric variables)
+```{r}
+meansTrain <- attr(scale(efw_train[, c(1, 3:34)]), "scaled:center")
+stddevsTrain <- attr(scale(efw_train[, c(1, 3:34)]), "scaled:scale")
+
+efw_train[, c(1, 3:34)] <- scale(efw_train[, c(1, 3:34)])
+efw_test[, c(1, 3:34)] <- scale(efw_test[,c(1, 3:34)], center = meansTrain, scale = stddevsTrain)
+```
+
+Split further between train and validation (90% train, 10% validation) and embed categorical variables
+```{r}
+library(data.table)
+library(mltools)
+
+set.seed(1)
+inTrain <- createDataPartition(efw_train$ECONOMIC.FREEDOM, p=0.9, list=FALSE)
+
+train2Label <- efw_train[inTrain, 2]
+valLabel <- efw_train[-inTrain, 2]
+efw_train2 <- as.data.frame(one_hot(as.data.table(efw_train[inTrain, -2]), cols=c("ISO_code","countries")))
+efw_test <- as.data.frame(one_hot(as.data.table(efw_test[, -2]), cols=c("ISO_code","countries")))
+efw_val <- as.data.frame(one_hot(as.data.table(efw_train[-inTrain, -2]), cols=c("ISO_code","countries")))
+efw_train <- as.data.frame(one_hot(as.data.table(efw_train[, -2]), cols=c("ISO_code","countries")))
+```
+
+Neural network models with train/validation
+```{r}
+library(keras)
+library(tfruns)
+
+runs <- tuning_run("FinalProject.R", 
+                   flags = list(
+                   nodes1 = c(64, 128, 392),
+                   nodes2=c(64, 128, 392),
+                   learning_rate = c(0.01, 0.05, 0.001, 0.0001),                
+                   batch_size=c(100,200,500),
+                   epochs=c(30,50,100),
+                   activation1=c("relu","sigmoid","tanh"),
+                   activation2=c("relu","sigmoid","tanh"),
+                   dropout1=c(0.05, 0.1, 0.2,0.5) ,
+                   dropout2=c(0.05, 0.1, 0.2,0.5)
+                     ),
+                    sample = 0.001)
+```
+
+Best neural network model
+best parameters: nodes1 = 392, nodes2 = 392, batch_size = 500, activation1 = tanh, activation2 = sigmoid, learning_rate = 0.0001, epochs = 30, dropout1 = 0.2, dropout2 = 0.5
+```{r}
+index = which.max(runs$metric_val_mse)
+view_run(runs$run_dir[index])
+```
+
+Neural network models with full train/test
+RMSE = 4.913784
+```{r}
+model = keras_model_sequential()
+model %>%
+  layer_dense(units=64, activation="tanh", input_shape=dim(efw_train)[2]) %>%
+  layer_dropout(0.05) %>%
+  layer_dense(units=1)
+
+model %>% compile(
+  optimizer = optimizer_adam(lr=0.0001),
+  loss = 'mse',
+  metrics = c('mse')
+)
+
+history <- model %>% fit(
+  as.matrix(efw_train), trainLabel,
+  nodes1 = 64,
+  nodes2 = 64,
+  batch_size=200,
+  activation1 = "tanh",
+  activation2 = "tanh",
+  epochs=30,
+  dropout1 = 0.05,
+  dropout2 = 0.1,
+  learning_rate=0.0001,
+  validation_data=list(as.matrix(efw_test), testLabel)
+)
+
+predictions = model %>% predict(as.matrix(efw_test))
+
+rmse = function(x, y) {
+  return((mean((x - y)^2))^0.5)
+}
+
+rmse(predictions, testLabel)
+```
